@@ -55,7 +55,7 @@ export default function IndexScreen() {
         hasPlayedRef.current = true;
         await Audio.setAudioModeAsync({ playsInSilentModeIOS: true, staysActiveInBackground: false });
         // Use 11labs TTS from backend (only Niraj Hindi voice)
-        const ttsUrl = `${API_BASE_URL}/tts?lang=hi&text=${encodeURIComponent('नमस्ते किसान भाई! कल बारिश होगी, छिड़काव से बचें।')}`;
+        const ttsUrl = `${API_BASE_URL}/tts?lang=hi&text=${encodeURIComponent('')}`;
         
         // Fetch audio with ngrok-skip-browser-warning header to bypass ngrok interstitial page
         const response = await fetch(ttsUrl, {
