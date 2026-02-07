@@ -1496,30 +1496,26 @@ app.post('/predict', upload.single('file'), async (req, res) => {
   try {
     console.log(`📸 File uploaded: ${filePath} (${file.size} bytes)`);
 
-    // ---------- PHASE 1: Plant check (Mock) ----------
-    // TODO: Implement actual plant classification model
-    const plantCheck = { is_plant: true, confidence: 0.99 };
-
-    if (!plantCheck.is_plant) {
-      // Cleanup file
-      fs.unlinkSync(filePath);
-      return res.json({
-        success: false,
-        message: "Uploaded image is not a plant",
-        details: plantCheck
-      });
-    }
-
-    // ---------- PHASE 2: REAL Plant Identification (PlantNet) ----------
-    // Detect organ from request body or default to 'leaf'
+    // 1. Plant Identification (PlantNet)
+    console.log('🌿 Step 1: Identifying plant with PlantNet...');
     const organ = req.body.organ || 'leaf';
     const plantIdentity = await identifyPlant(filePath, organ);
 
-    // ---------- PHASE 4 & 5: AI Disease Analysis (YOLOv8 + MobileNet via Python) ----------
-    console.log('🔬 Starting AI Disease Analysis...');
+    // If PlantNet fails or returns low confidence (optional check), we might still want to proceed 
+    // or return early. For now, we proceed but log it.
+    console.log(`✅ Plant Identified: ${plantIdentity.plant_common} (${plantIdentity.plant_scientific})`);
 
-    // Spawn Python process
-    const pythonProcess = spawn('python', ['scripts/crop_inference.py', filePath]);
+    // 2. Disease Analysis (Python: YOLOv8 + MobileNetV3)
+    console.log('🔬 Step 2: Running AI Disease Analysis (YOLOv8 + MobileNetV3)...');
+
+    // Pass plant name to Python script just in case it's needed for context/logging
+    // We wrap the plant name in quotes to handle spaces
+    const pythonArgs = ['scripts/crop_inference.py', filePath];
+    if (plantIdentity.plant_common) {
+      pythonArgs.push(plantIdentity.plant_common);
+    }
+
+    const pythonProcess = spawn('python', pythonArgs);
 
     let pythonData = '';
     let pythonError = '';
@@ -1537,58 +1533,89 @@ app.post('/predict', upload.single('file'), async (req, res) => {
         if (code !== 0) {
           console.error(`Python script exited with code ${code}`);
           console.error(`Python Error: ${pythonError}`);
-          // Fallback to Healthy if script fails
+          // Resolve with error state rather than rejecting to prevent server crash
           resolve({
             success: false,
-            disease: "Unknown (Analysis Failed)",
+            disease: "Analysis Failed",
             confidence: 0,
-            details: "AI Model could not process image."
+            details: "Computer vision model failed. " + pythonError.split('\n')[0] // Return first line of error
           });
         } else {
           try {
-            const result = JSON.parse(pythonData);
-            const analysis = result.disease_analysis;
-            resolve({
-              success: true,
-              disease: analysis.disease,
-              confidence: analysis.confidence,
-              details: `Detected via ${analysis.model}. Leaf detected: ${result.leaf_detection.detected}`
-            });
+            // Find the JSON part of the output (in case of other stdout logs)
+            const jsonStart = pythonData.indexOf('{');
+            const jsonEnd = pythonData.lastIndexOf('}');
+            if (jsonStart !== -1 && jsonEnd !== -1) {
+              const jsonStr = pythonData.substring(jsonStart, jsonEnd + 1);
+              const result = JSON.parse(jsonStr);
+
+              if (!result.success) {
+                resolve({
+                  success: false,
+                  disease: "Error",
+                  details: result.error || "Python script error"
+                });
+                return;
+              }
+
+              const analysis = result.disease_analysis;
+              const leafInfo = result.leaf_detection;
+
+              resolve({
+                success: true,
+                disease: analysis.disease,
+                confidence: analysis.confidence,
+                details: `Detected via ${analysis.model}. Leaf detected: ${leafInfo.detected ? 'Yes' : 'No'} (${leafInfo.objects} objects)`,
+                // Pass through raw data if needed
+                raw: result
+              });
+            } else {
+              console.error('No JSON found in Python output:', pythonData);
+              resolve({
+                success: false,
+                disease: "Analysis Error",
+                confidence: 0,
+                details: "Invalid output from AI model"
+              });
+            }
           } catch (e) {
             console.error('Failed to parse Python output:', pythonData);
             resolve({
               success: false,
               disease: "Parse Error",
-              confidence: 0
+              confidence: 0,
+              details: "Could not parse model results."
             });
           }
         }
       });
     });
 
-    // ---------- PHASE 6: INTELLECTUAL AI SOLUTION (Groq / Llama 3) ----------
+    // 3. AI Solution (LLM)
+    console.log(`🧠 Step 3: Generating AI Solution for "${diseaseResult.disease}" on "${plantIdentity.plant_common}"...`);
+
     let aiSolution = {
-      treatment: "No treatment required for healthy plants.",
-      prevention: ["Maintain good soil health", "Water regularly"],
-      tips: ["Monitor for pests"]
+      treatment: "Consult a local agricultural expert.",
+      prevention: [],
+      tips: []
     };
 
-    if (diseaseResult.disease && diseaseResult.disease !== 'Healthy') {
-      if (!groq) {
-        console.log('⚠️ Skipping AI Solution: GROQ_API_KEY not configured.');
-        aiSolution.treatment = "AI Recommendations unavailable (Server Config Error).";
-      } else {
+    if (diseaseResult.success && diseaseResult.disease !== 'Healthy' && diseaseResult.disease !== 'Analysis Failed' && diseaseResult.disease !== 'Error') {
+      if (groq) {
         try {
-          console.log('🧠 Generating AI Solution for:', diseaseResult.disease);
           const prompt = `
-                Act as an agricultural expert. A farmer has detected "${diseaseResult.disease}" on their "${plantIdentity.plant_common || 'crop'}".
-                
-                Provide a strict JSON response with no markdown formatted as:
-                {
-                    "treatment": "Brief step-by-step treatment plan (max 2 sentences)",
-                    "prevention": ["List of 3 short prevention tips"],
-                    "tips": ["List of 2 general maintainance tips"]
-                }
+                    Act as an agricultural expert. 
+                    Context:
+                    - Crop: ${plantIdentity.plant_common} (${plantIdentity.plant_scientific})
+                    - Detected Condition: ${diseaseResult.disease}
+                    - Confidence: ${(diseaseResult.confidence * 100).toFixed(1)}%
+                    
+                    Provide a strict JSON response (no markdown) with practical advice for an Indian farmer:
+                    {
+                        "treatment": "Brief step-by-step treatment plan (max 3 sentences)",
+                        "prevention": ["List of 3 short prevention tips"],
+                        "tips": ["List of 2 general maintenance tips for this crop"]
+                    }
                 `;
 
           const completion = await groq.chat.completions.create({
@@ -1602,31 +1629,45 @@ app.post('/predict', upload.single('file'), async (req, res) => {
           if (content) {
             aiSolution = JSON.parse(content);
           }
-        } catch (groqError) {
-          console.error('Groq AI Error:', groqError);
-          // Non-blocking error, stick to defaults
+        } catch (err) {
+          console.error("LLM Generation failed:", err.message);
         }
       }
+    } else if (diseaseResult.disease === 'Healthy') {
+      aiSolution = {
+        treatment: "Your crop looks healthy! Keep up the good work.",
+        prevention: ["Continue regular watering", "Monitor for early signs of pests"],
+        tips: ["Ensure proper sunlight", "Maintain soil moisture"]
+      };
     }
 
-    // Cleanup file
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-
-    res.json({
+    // Final Response Construction
+    const finalResponse = {
       success: true,
       plant_identification: plantIdentity,
       disease_detection: diseaseResult,
-      ai_solution: aiSolution
-    });
+      ai_solution: aiSolution,
+      crop: plantIdentity.plant_common, // For backward compatibility
+      message: "Analysis complete"
+    };
+
+    // Cleanup
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (e) { }
+
+    res.json(finalResponse);
 
   } catch (error) {
-    console.error('Error in /predict:', error);
-    // Attempt cleanup
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    console.error('Prediction Flow Error:', error);
+    // Cleanup
+    try {
+      if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    } catch (e) { }
 
     res.status(500).json({
       success: false,
-      message: 'Analysis failed',
+      message: "Internal Server Error during prediction pipeline",
       error: error.message
     });
   }
