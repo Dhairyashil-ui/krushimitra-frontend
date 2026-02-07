@@ -1605,15 +1605,21 @@ app.post('/predict', upload.single('file'), async (req, res) => {
         try {
           const prompt = `
                     Act as an agricultural expert. 
+                    
                     Context:
                     - Crop: ${plantIdentity.plant_common} (${plantIdentity.plant_scientific})
-                    - Detected Condition: ${diseaseResult.disease}
+                    - Detected Object/Condition: "${diseaseResult.disease}"
                     - Confidence: ${(diseaseResult.confidence * 100).toFixed(1)}%
+                    
+                    IMPORTANT: The disease detection model is currently running in a generic mode (ImageNet). 
+                    - If the "Detected Object" is a pest (e.g., "slug", "beetle", "worm"), treat it as a pest infestation.
+                    - If the "Detected Object" is unrelated (e.g., "pot", "velvet", "chain"), ignore it and provide GENERAL healthy care tips for this specific crop.
+                    - If the "Detected Object" sounds like a disease (e.g., "rust", "mildew"), treat it as a disease.
                     
                     Provide a strict JSON response (no markdown) with practical advice for an Indian farmer:
                     {
-                        "treatment": "Brief step-by-step treatment plan (max 3 sentences)",
-                        "prevention": ["List of 3 short prevention tips"],
+                        "treatment": "Brief treatment plan if a pest/disease is identified, otherwise say 'No specific disease detected, follow general care'. (max 3 sentences)",
+                        "prevention": ["List of 3 short prevention/maintenance tips"],
                         "tips": ["List of 2 general maintenance tips for this crop"]
                     }
                 `;
